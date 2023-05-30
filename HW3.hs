@@ -60,32 +60,113 @@ prettyPrintHelperIdentation level (Define var exp) = identation level ++ var ++ 
 
 instance PrettyPrint Statement where
   prettyPrint = prettyPrintHelperIdentation 0
-  
+
 instance PrettyPrint [Statement] where
   prettyPrint = unlines . map prettyPrint
 
 -- -- Section 1.2: Simplifying expressions and statements
--- type Scope = Map Variable Bool
+type Scope = Map Variable Bool
 
--- simplifyExpression :: Scope -> Expression -> Expression
+simplifyExpression :: Scope -> Expression -> Expression
+simplifyExpression _ (Literal x) = Literal x
+simplifyExpression scope (Not exp) =
+  case simplifyExpression scope exp of
+    Literal val -> Literal (not val)
+    simplifiedExp -> Not simplifiedExp
+simplifyExpression scope (Or exp1 exp2) =
+  case (simplifyExpression scope exp1, simplifyExpression scope exp2) of
+    (Literal True, _) -> Literal True
+    (_, Literal True) -> Literal True
+    (Literal val1, Literal val2) -> Literal (val1 || val2)
+    (simplifiedExp1, simplifiedExp2) -> Or simplifiedExp1 simplifiedExp2
+simplifyExpression scope (And exp1 exp2) =
+  case (simplifyExpression scope exp1, simplifyExpression scope exp2) of
+    (Literal False, _) -> Literal False
+    (_, Literal False) -> Literal False
+    (Literal val1, Literal val2) -> Literal (val1 && val2)
+    (simplifiedExp1, simplifiedExp2) -> And simplifiedExp1 simplifiedExp2
+simplifyExpression scope (Var x) =
+  case M.lookup x scope of
+    Just val -> Literal val
+    Nothing -> Var x
 
--- simplifyWithScope :: Scope -> [Statement] -> [Statement]
--- simplifyWithScope s = reverse . snd . foldl' (uncurry go) (s, []) where
---   go :: Scope -> [Statement] -> Statement -> (Scope, [Statement])
---   go scope statementsSoFar statement =
---     let (newScope, simplified) = simplifyStatement scope statement
---      in (newScope, simplified ++ statementsSoFar)
---   simplifyStatement :: Scope -> Statement -> (Scope, [Statement])
+simplifyWithScope :: Scope -> [Statement] -> [Statement]
+simplifyWithScope s = reverse . snd . foldl' (uncurry go) (s, []) where
+  go :: Scope -> [Statement] -> Statement -> (Scope, [Statement])
+  go scope statementsSoFar statement =
+    let (newScope, simplified) = simplifyStatement scope statement
+     in (newScope, simplified ++ statementsSoFar)
+  simplifyStatement :: Scope -> Statement -> (Scope, [Statement])
+  simplifyStatement scope (Return exp) = (scope, [Return $ simplifyExpression scope exp])
+  simplifyStatement scope (Block states) = (scope, [Block $ simplifyWithScope scope states])
+  simplifyStatement scope (Define var exp) = case simplifyExpression scope exp of
+    Literal bool_val -> (scope', [Define var (Literal bool_val)]) where scope' = M.insert var bool_val scope
+    _ -> (scope', [Define var $ simplifyExpression scope exp]) where scope' = M.delete var scope
+  simplifyStatement scope (If exp states) = case simplifyExpression scope exp of
+    Literal False -> (scope, [])
+    Literal True -> simplifyStatement scope (Block states)
+    Var x -> let scope' = M.insert x True scope
+              in (scope', [If exp $ simplifyWithScope scope' states])
+    _ -> (scope, [If exp $ simplifyWithScope scope states])
+  simplifyStatement scope (IfElse exp states1 states2) = case simplifyExpression scope exp of
+    Literal True -> (scope, simplifyWithScope scope states1)
+    Literal False -> (scope, simplifyWithScope scope states2)
+    Var x -> let updateVar b = M.insert x b scope
+              in (scope, [IfElse (Var x) (simplifyWithScope (updateVar True) states1) (simplifyWithScope (updateVar False) states2)])
+    _ -> (scope, [IfElse exp (simplifyWithScope scope states1) (simplifyWithScope scope states2)])
 
--- simplify :: [Statement] -> [Statement]
 
--- -- Section 2.1: Basic type classes
--- data Tree a = Empty | Tree (Tree a) a (Tree a)
--- instance Show a => Show (Tree a) where
--- instance Eq a => Eq (Tree a) where
--- instance Ord a => Ord (Tree a) where
+
+simplify :: [Statement] -> [Statement]
+simplify = simplifyWithScope M.empty  
+
+-- Section 2.1: Basic type classes
+data Tree a = Empty | Tree (Tree a) a (Tree a)
+instance Show a => Show (Tree a) where
+  show x = "{" ++ init (go x) ++ "}" where
+    go :: Tree a  -> String
+    go = \case
+      Empty -> ""
+      (Tree left value right) -> go left ++ show value ++ "," ++ go right
+
+treeToList:: Tree a -> [a]
+treeToList Empty = []
+treeToList (Tree left val right) = treeToList left ++ [val] ++ treeToList right
+
+instance Eq a => Eq (Tree a) where
+  Empty == Empty = True
+  (Tree left1 val1 right1) == (Tree left2 val2 right2) = treeToList (Tree left1 val1 right1) == treeToList (Tree left2 val2 right2)
+  _ == _ = False
+
+instance Ord a => Ord (Tree a) where
+  compare Empty Empty = EQ
+  compare Empty _ = LT
+  compare _ Empty = GT
+  compare (Tree left1 val1 right1) (Tree left2 val2 right2) =  treeToList (Tree left1 val1 right1) `compare` treeToList (Tree left2 val2 right2)
 
 -- -- Section 2.2: Typeclass constraints
--- nub :: Eq a => [a] -> [a]
--- sort :: Ord a => [a] -> [a]
--- sortOn :: Ord b => (a -> b) -> [a] -> [a]
+nub :: Eq a => [a] -> [a]
+nub [] = []
+nub (x:xs) = x : nub (filter (/= x) xs)
+
+sort :: Ord a => [a] -> [a]
+sort [] = []
+sort (x:xs) = insert x (sort xs)
+  where
+    insert :: Ord a => a -> [a] -> [a]
+    insert z [] = [z]
+    insert z (y:ys) = case z `compare` y of
+      LT  -> z : y : ys
+      EQ -> z : y : ys
+      _ -> y : insert z ys
+
+sortOn :: forall a b. Ord b => (a -> b) -> [a] -> [a]
+sortOn _ [] = []
+sortOn f (x:xs) = insert x (sortOn f xs)
+  where
+    insert :: Ord b => a -> [a] -> [a]
+    insert z [] = [z]
+    insert z (y:ys) = case f z `compare` f y of
+      LT -> x : y : ys
+      EQ -> x : y : ys
+      GT -> y : insert x ys
